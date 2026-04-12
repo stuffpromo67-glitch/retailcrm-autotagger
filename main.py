@@ -63,7 +63,7 @@ async def ws_listener():
                         event = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    if event.get("type") == "message_new":
+                    logger.info("WS EVENT: %s", json.dumps(event, ensure_ascii=False)[:1000])\n                    if event.get("type") == "message_new":
                         data = event.get("data", {})
                         msg = data.get("message", {})
                         chat_id = msg.get("chat_id")
