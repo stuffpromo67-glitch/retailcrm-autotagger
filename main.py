@@ -63,7 +63,8 @@ async def ws_listener():
                         event = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    logger.info("WS EVENT: %s", json.dumps(event, ensure_ascii=False)[:1000])\n                    if event.get("type") == "message_new":
+                    logger.info("WS EVENT: %s", json.dumps(event, ensure_ascii=False)[:1000])
+                    if event.get("type") == "message_new":
                         data = event.get("data", {})
                         msg = data.get("message", {})
                         chat_id = msg.get("chat_id")
@@ -90,7 +91,7 @@ async def lifespan(app):
         pass
     await mg_client.close()
 
-app = FastAPI(title="RetailCRM Autotagger", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="RetailCRM Autotagger", version="2.1.0", lifespan=lifespan)
 
 @app.get("/")
 async def health():
