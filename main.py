@@ -54,7 +54,7 @@ async def ws_listener():
         try:
             async with websockets.connect(
                 ws_url,
-                additional_headers={"X-Bot-Token": MG_BOT_TOKEN},
+                additional_headers={"x-bot-token": MG_BOT_TOKEN},
                 ping_interval=30, ping_timeout=10,
             ) as ws:
                 logger.info("Connected to MG Bot WebSocket")
