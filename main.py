@@ -1,5 +1,5 @@
 """
-main.py — Autotagger via MG Bot API
+main.py — Autotagger via MG Bot API + RetailCRM API v5
 """
 
 import asyncio
@@ -29,8 +29,8 @@ MG_BOT_ENDPOINT = os.environ["MG_BOT_ENDPOINT"]
 mg_client = MGBotClient(MG_BOT_ENDPOINT, MG_BOT_TOKEN, retailcrm_url=RETAILCRM_URL, retailcrm_api_key=RETAILCRM_API_KEY)
 
 
-async def process_chat(chat_id):
-    logger.info("Processing chat #%d", chat_id)
+async def process_chat(chat_id, mg_customer_id=None):
+    logger.info("Processing chat #%d, mg_customer_id=%s", chat_id, mg_customer_id)
     try:
         messages = await mg_client.get_chat_messages(chat_id, limit=30)
     except Exception as exc:
@@ -38,11 +38,30 @@ async def process_chat(chat_id):
         return
     if not messages:
         return
+
+    # Extract mg_customer_id from first customer message if not provided
+    if not mg_customer_id:
+        for msg in messages:
+            from_info = msg.get("from", {})
+            if from_info.get("type") == "customer":
+                mg_customer_id = from_info.get("id")
+                break
+
+    if not mg_customer_id:
+        logger.warning("No customer found in chat #%d", chat_id)
+        return
+
+    # Find real RetailCRM customer ID
+    crm_customer_id = await mg_client.find_crm_customer_by_mg_id(mg_customer_id)
+    if not crm_customer_id:
+        logger.error("CRM customer not found for mg_customer_id=%s", mg_customer_id)
+        return
+
     dialog_text = build_dialog_text(messages)
     try:
         tag = classify_dialog(dialog_text, ANTHROPIC_API_KEY)
-        logger.info("Chat #%d -> tag: %s", chat_id, tag)
-        await mg_client.set_dialog_tag_via_crm(chat_id, tag)
+        logger.info("Chat #%d -> tag: %s (CRM customer %s)", chat_id, tag, crm_customer_id)
+        await mg_client.set_customer_tag(crm_customer_id, tag)
     except Exception as exc:
         logger.error("Error classifying chat #%d: %s", chat_id, exc)
 
@@ -63,13 +82,17 @@ async def ws_listener():
                         event = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    logger.info("WS EVENT: %s", json.dumps(event, ensure_ascii=False)[:1000])
                     if event.get("type") == "message_new":
                         data = event.get("data", {})
                         msg = data.get("message", {})
                         chat_id = msg.get("chat_id")
+                        # Get MG customer ID from message sender
+                        from_info = msg.get("from", {})
+                        mg_customer_id = None
+                        if from_info.get("type") == "customer":
+                            mg_customer_id = from_info.get("id")
                         if chat_id:
-                            asyncio.create_task(process_chat(int(chat_id)))
+                            asyncio.create_task(process_chat(int(chat_id), mg_customer_id))
         except (websockets.ConnectionClosed, OSError) as exc:
             logger.warning("WebSocket disconnected: %s, reconnecting in 5s", exc)
             await asyncio.sleep(5)
@@ -91,8 +114,8 @@ async def lifespan(app):
         pass
     await mg_client.close()
 
-app = FastAPI(title="RetailCRM Autotagger", version="2.1.0", lifespan=lifespan)
+app = FastAPI(title="RetailCRM Autotagger", version="2.2.0", lifespan=lifespan)
 
 @app.get("/")
 async def health():
-    return JSONResponse({"status": "ok", "mg_bot_endpoint": MG_BOT_ENDPOINT})
+    return JSONResponse({"status": "ok", "version": "2.2.0", "mg_bot_endpoint": MG_BOT_ENDPOINT})
