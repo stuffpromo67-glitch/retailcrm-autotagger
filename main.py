@@ -1,6 +1,6 @@
 """
 main.py — Autotagger via MG Bot API
-Tags dialogs with multiple tags. Skips if not enough context.
+Tags dialogs with multiple tags. Checks customer history.
 """
 
 import asyncio
@@ -38,16 +38,21 @@ async def process_chat(chat_id):
     if not messages:
         return
 
-    # Find dialog ID for this chat
-    dialog = await mg_client.get_dialogs(chat_id)
+    # Find active dialog
+    dialog = await mg_client.get_active_dialog(chat_id)
     if not dialog:
         logger.warning("No dialog found for chat #%d", chat_id)
         return
     dialog_id = dialog.get("id")
 
+    # Check if customer is new (first dialog ever)
+    dialog_count = await mg_client.count_dialogs(chat_id)
+    is_new_customer = dialog_count <= 1
+    logger.info("Chat #%d: %d dialogs, is_new=%s", chat_id, dialog_count, is_new_customer)
+
     dialog_text = build_dialog_text(messages)
     try:
-        tags = classify_dialog(dialog_text, ANTHROPIC_API_KEY)
+        tags = classify_dialog(dialog_text, ANTHROPIC_API_KEY, is_new_customer=is_new_customer)
         if not tags:
             logger.info("Chat #%d, dialog #%s -> skipped (not enough context)", chat_id, dialog_id)
             return
@@ -101,8 +106,8 @@ async def lifespan(app):
         pass
     await mg_client.close()
 
-app = FastAPI(title="RetailCRM Autotagger", version="3.1.0", lifespan=lifespan)
+app = FastAPI(title="RetailCRM Autotagger", version="3.2.0", lifespan=lifespan)
 
 @app.get("/")
 async def health():
-    return JSONResponse({"status": "ok", "version": "3.1.0", "mg_bot_endpoint": MG_BOT_ENDPOINT})
+    return JSONResponse({"status": "ok", "version": "3.2.0", "mg_bot_endpoint": MG_BOT_ENDPOINT})

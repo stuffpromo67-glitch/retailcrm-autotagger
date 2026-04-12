@@ -1,8 +1,6 @@
 """
 classifier.py — ИИ-классификатор диалогов RetailCRM
 Использует Claude API для определения тегов по тексту разговора.
-Поддерживает несколько тегов одновременно.
-Может вернуть пустой список если контекста недостаточно.
 """
 
 import anthropic
@@ -32,15 +30,18 @@ SYSTEM_PROMPT = """Ты — ассистент для отдела продаж 
 2. Если контекст понятен — верни названия подходящих тегов через запятую.
 3. Можно вернуть несколько тегов если они подходят (например: «новый клиент, ждет ответ»).
 4. Не добавляй пояснений, кавычек или точку в конце.
+5. ВАЖНО: тег «новый клиент» можно ставить ТОЛЬКО если в дополнительной информации указано что это первый диалог клиента. Если у клиента уже были диалоги раньше — НЕ ставь этот тег.
 """
 
 
-def classify_dialog(dialog_text: str, api_key: str) -> list[str]:
+def classify_dialog(dialog_text: str, api_key: str, is_new_customer: bool = True) -> list[str]:
     """
     Классифицирует диалог и возвращает список подходящих тегов.
     Возвращает пустой список если контекста недостаточно.
     """
     client = anthropic.Anthropic(api_key=api_key)
+
+    context_info = "Это ПЕРВЫЙ диалог клиента." if is_new_customer else "Клиент обращался ранее (НЕ новый)."
 
     message = client.messages.create(
         model="claude-haiku-4-5-20251001",
@@ -49,21 +50,23 @@ def classify_dialog(dialog_text: str, api_key: str) -> list[str]:
         messages=[
             {
                 "role": "user",
-                "content": f"Диалог с клиентом:\n\n{dialog_text}\n\nКакие теги поставить?",
+                "content": f"Дополнительная информация: {context_info}\n\nДиалог с клиентом:\n\n{dialog_text}\n\nКакие теги поставить?",
             }
         ],
     )
 
     raw = message.content[0].text.strip().lower()
 
-    # If model says to skip — return empty list
     if "пропуск" in raw or "skip" in raw:
         return []
 
-    # Parse multiple tags from response
     found_tags = []
     for tag in TAGS:
         if tag in raw:
             found_tags.append(tag)
+
+    # Double-check: remove "новый клиент" if customer is not new
+    if not is_new_customer and "новый клиент" in found_tags:
+        found_tags.remove("новый клиент")
 
     return found_tags

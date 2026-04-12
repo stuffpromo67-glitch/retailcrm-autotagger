@@ -1,5 +1,5 @@
 """
-mg_bot_client.py — MG Bot API + RetailCRM API client
+mg_bot_client.py — MG Bot API client
 """
 
 import logging
@@ -10,11 +10,9 @@ _API = "/api/bot/v1"
 
 
 class MGBotClient:
-    def __init__(self, endpoint, token, retailcrm_url=None, retailcrm_api_key=None):
+    def __init__(self, endpoint, token):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
-        self.retailcrm_url = (retailcrm_url or "").rstrip("/")
-        self.retailcrm_api_key = retailcrm_api_key or ""
         self._http = httpx.AsyncClient(
             base_url=self.endpoint,
             headers={"x-bot-token": token, "Content-Type": "application/json"},
@@ -32,17 +30,28 @@ class MGBotClient:
         return resp.json()
 
     async def get_dialogs(self, chat_id):
-        resp = await self._http.get(f"{_API}/dialogs", params={"chat_id": chat_id, "limit": 1})
+        """Get all dialogs for a chat."""
+        resp = await self._http.get(f"{_API}/dialogs", params={"chat_id": chat_id})
         resp.raise_for_status()
-        dialogs = resp.json()
+        return resp.json()
+
+    async def get_active_dialog(self, chat_id):
+        """Get the active (not closed) dialog for a chat."""
+        dialogs = await self.get_dialogs(chat_id)
+        for d in dialogs:
+            if d.get("closed_at") is None:
+                return d
         if dialogs:
             return dialogs[0]
         return None
 
+    async def count_dialogs(self, chat_id):
+        """Count total dialogs for a chat (to determine if customer is new)."""
+        dialogs = await self.get_dialogs(chat_id)
+        return len(dialogs)
+
     async def add_dialog_tags(self, dialog_id, tags):
-        """Add tags to a dialog via MG Bot API.
-        tags: list of tag name strings, e.g. ["новый клиент", "ждет ответ"]
-        """
+        """Add tags to a dialog via MG Bot API."""
         tag_objects = [{"name": t} for t in tags]
         resp = await self._http.patch(
             f"{_API}/dialogs/{dialog_id}/tags/add",
