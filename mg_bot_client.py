@@ -15,14 +15,14 @@ class MGBotClient:
         self.token = token
         self._http = httpx.AsyncClient(
             base_url=self.endpoint,
-            headers={"X-Bot-Token": token, "Content-Type": "application/json"},
+            headers={"x-bot-token": token, "Content-Type": "application/json"},
             timeout=30.0,
         )
 
     @property
     def ws_url(self):
         base = self.endpoint.replace("https://", "wss://").replace("http://", "ws://")
-        return f"{base}{_API}/ws?events[]=message_new"
+        return f"{base}{_API}/ws?events=message_new"
 
     async def get_chat_messages(self, chat_id, limit=30):
         resp = await self._http.get(f"{_API}/messages", params={"chat_id": chat_id, "limit": limit})
