@@ -26,7 +26,7 @@ RETAILCRM_API_KEY = os.getenv("RETAILCRM_API_KEY", "")
 MG_BOT_TOKEN = os.environ["MG_BOT_TOKEN"]
 MG_BOT_ENDPOINT = os.environ["MG_BOT_ENDPOINT"]
 
-mg_client = MGBotClient(MG_BOT_ENDPOINT, MG_BOT_TOKEN)
+mg_client = MGBotClient(MG_BOT_ENDPOINT, MG_BOT_TOKEN, retailcrm_url=RETAILCRM_URL, retailcrm_api_key=RETAILCRM_API_KEY)
 
 
 async def process_chat(chat_id):
@@ -42,7 +42,7 @@ async def process_chat(chat_id):
     try:
         tag = classify_dialog(dialog_text, ANTHROPIC_API_KEY)
         logger.info("Chat #%d -> tag: %s", chat_id, tag)
-        await mg_client.set_chat_tag(chat_id, tag)
+        await mg_client.set_dialog_tag_via_crm(chat_id, tag)
     except Exception as exc:
         logger.error("Error classifying chat #%d: %s", chat_id, exc)
 
