@@ -20,7 +20,6 @@ class MGBotClient:
             headers={"x-bot-token": token, "Content-Type": "application/json"},
             timeout=30.0,
         )
-        self._crm_http = httpx.AsyncClient(timeout=30.0)
 
     @property
     def ws_url(self):
@@ -32,56 +31,31 @@ class MGBotClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def find_crm_customer_by_mg_id(self, mg_customer_id):
-        """Find RetailCRM customer ID by MG Bot customer ID."""
-        if not self.retailcrm_url or not self.retailcrm_api_key:
-            return None
-        url = f"{self.retailcrm_url}/api/v5/customers"
-        params = {
-            "apiKey": self.retailcrm_api_key,
-            "filter[mgCustomerId]": mg_customer_id,
-            "limit": 20,
-        }
-        try:
-            resp = await self._crm_http.get(url, params=params)
-            if resp.is_success:
-                data = resp.json()
-                customers = data.get("customers", [])
-                if customers:
-                    return customers[0].get("id")
-            logger.warning("Customer not found for mgCustomerId=%s", mg_customer_id)
-        except Exception as exc:
-            logger.error("Error searching customer: %s", exc)
+    async def get_dialogs(self, chat_id):
+        resp = await self._http.get(f"{_API}/dialogs", params={"chat_id": chat_id, "limit": 1})
+        resp.raise_for_status()
+        dialogs = resp.json()
+        if dialogs:
+            return dialogs[0]
         return None
 
-    async def set_customer_tag(self, crm_customer_id, tag):
-        """Set tag on customer via RetailCRM API v5."""
-        if not self.retailcrm_url or not self.retailcrm_api_key:
-            logger.error("RetailCRM URL or API key not configured")
-            return False
-        url = f"{self.retailcrm_url}/api/v5/customers/{crm_customer_id}/edit"
-        import json
-        data = {
-            "apiKey": self.retailcrm_api_key,
-            "by": "id",
-            "customer": json.dumps({"addTags": [tag]}),
-        }
-        try:
-            resp = await self._crm_http.post(url, data=data)
-            if resp.is_success:
-                result = resp.json()
-                if result.get("success"):
-                    logger.info("Tag '%s' set on CRM customer %s", tag, crm_customer_id)
-                    return True
-            logger.error("Failed to set tag: %s %s", resp.status_code, resp.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("Error setting tag: %s", exc)
-            return False
+    async def add_dialog_tags(self, dialog_id, tags):
+        """Add tags to a dialog via MG Bot API.
+        tags: list of tag name strings, e.g. ["новый клиент", "ждет ответ"]
+        """
+        tag_objects = [{"name": t} for t in tags]
+        resp = await self._http.patch(
+            f"{_API}/dialogs/{dialog_id}/tags/add",
+            json={"tags": tag_objects},
+        )
+        if resp.is_success:
+            logger.info("Tags %s added to dialog #%d", tags, dialog_id)
+            return True
+        logger.error("Failed to add tags to dialog #%d: %s %s", dialog_id, resp.status_code, resp.text[:200])
+        return False
 
     async def close(self):
         await self._http.aclose()
-        await self._crm_http.aclose()
 
 
 def build_dialog_text(messages):
