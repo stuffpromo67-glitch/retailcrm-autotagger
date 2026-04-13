@@ -1,6 +1,8 @@
 """
-main.py — Autotagger via MG Bot API + RetailCRM API v5
-Sets CUSTOMER tags (attached/pinned) visible in chat UI.
+main.py — Autotagger + Quality Checker for RetailCRM
+- WebSocket listener for auto-tagging dialogs
+- Scheduled daily quality check at 9:00 MSK
+- Manual endpoint POST /run-quality-check
 """
 
 import asyncio
@@ -8,14 +10,16 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import websockets
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from classifier import classify_dialog
 from mg_bot_client import MGBotClient, build_dialog_text
+from quality_checker import run_quality_check, format_report_csv
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
@@ -27,8 +31,12 @@ RETAILCRM_API_KEY = os.getenv("RETAILCRM_API_KEY", "")
 MG_BOT_TOKEN = os.environ["MG_BOT_TOKEN"]
 MG_BOT_ENDPOINT = os.environ["MG_BOT_ENDPOINT"]
 
+MSK = timezone(timedelta(hours=3))
+
 mg_client = MGBotClient(MG_BOT_ENDPOINT, MG_BOT_TOKEN, retailcrm_url=RETAILCRM_URL, retailcrm_api_key=RETAILCRM_API_KEY)
 
+
+# ---- Auto-tagging ----
 
 async def process_chat(chat_id, mg_customer_id=None):
     logger.info("Processing chat #%d, mg_customer_id=%s", chat_id, mg_customer_id)
@@ -39,8 +47,6 @@ async def process_chat(chat_id, mg_customer_id=None):
         return
     if not messages:
         return
-
-    # Extract mg_customer_id from messages if not provided
     if not mg_customer_id:
         for msg in messages:
             from_info = msg.get("from", {})
@@ -48,19 +54,12 @@ async def process_chat(chat_id, mg_customer_id=None):
                 mg_customer_id = from_info.get("id")
                 break
     if not mg_customer_id:
-        logger.warning("No customer found in chat #%d", chat_id)
         return
-
-    # Find real RetailCRM customer ID
     crm_customer_id = await mg_client.find_crm_customer_by_mg_id(mg_customer_id)
     if not crm_customer_id:
-        logger.error("CRM customer not found for mg_customer_id=%s", mg_customer_id)
         return
-
-    # Check if customer is new
     dialog_count = await mg_client.count_dialogs(chat_id)
     is_new_customer = dialog_count <= 1
-
     dialog_text = build_dialog_text(messages)
     try:
         tags = classify_dialog(dialog_text, ANTHROPIC_API_KEY, is_new_customer=is_new_customer)
@@ -109,19 +108,73 @@ async def ws_listener():
             await asyncio.sleep(10)
 
 
+# ---- Daily quality check scheduler ----
+
+async def daily_quality_scheduler():
+    """Run quality check every day at 9:00 MSK."""
+    while True:
+        now = datetime.now(MSK)
+        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target += timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        logger.info("Next quality check at %s MSK (in %.0f min)", target.strftime("%Y-%m-%d %H:%M"), wait_seconds / 60)
+        await asyncio.sleep(wait_seconds)
+
+        try:
+            logger.info("Starting scheduled quality check...")
+            rows = await run_quality_check(
+                MG_BOT_ENDPOINT, MG_BOT_TOKEN,
+                RETAILCRM_URL, RETAILCRM_API_KEY,
+                ANTHROPIC_API_KEY,
+            )
+            report = format_report_csv(rows)
+            logger.info("Quality report:\n%s", report)
+        except Exception as exc:
+            logger.error("Quality check failed: %s", exc)
+
+
+# ---- Lifespan ----
+
 @asynccontextmanager
 async def lifespan(app):
-    task = asyncio.create_task(ws_listener())
+    ws_task = asyncio.create_task(ws_listener())
+    quality_task = asyncio.create_task(daily_quality_scheduler())
     yield
-    task.cancel()
+    ws_task.cancel()
+    quality_task.cancel()
     try:
-        await task
+        await ws_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await quality_task
     except asyncio.CancelledError:
         pass
     await mg_client.close()
 
-app = FastAPI(title="RetailCRM Autotagger", version="4.0.0", lifespan=lifespan)
+
+app = FastAPI(title="RetailCRM Autotagger + Quality", version="5.0.0", lifespan=lifespan)
+
 
 @app.get("/")
 async def health():
-    return JSONResponse({"status": "ok", "version": "4.0.0", "mg_bot_endpoint": MG_BOT_ENDPOINT})
+    return JSONResponse({"status": "ok", "version": "5.0.0"})
+
+
+@app.post("/run-quality-check")
+async def manual_quality_check(days_ago: int = 1):
+    """Manually trigger quality check. ?days_ago=1 for yesterday (default)."""
+    target_date = datetime.now(MSK).date() - timedelta(days=days_ago)
+    try:
+        rows = await run_quality_check(
+            MG_BOT_ENDPOINT, MG_BOT_TOKEN,
+            RETAILCRM_URL, RETAILCRM_API_KEY,
+            ANTHROPIC_API_KEY,
+            target_date=target_date,
+        )
+        report = format_report_csv(rows)
+        return PlainTextResponse(report, media_type="text/csv; charset=utf-8")
+    except Exception as exc:
+        logger.error("Manual quality check failed: %s", exc)
+        return JSONResponse({"error": str(exc)}, status_code=500)
