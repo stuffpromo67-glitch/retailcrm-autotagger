@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from classifier import classify_dialog
 from mg_bot_client import MGBotClient, build_dialog_text
 from quality_checker import run_quality_check, format_report_csv
+from sheets_writer import GoogleSheetsWriter
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(message)s")
@@ -30,6 +31,8 @@ RETAILCRM_URL = os.getenv("RETAILCRM_URL", "")
 RETAILCRM_API_KEY = os.getenv("RETAILCRM_API_KEY", "")
 MG_BOT_TOKEN = os.environ["MG_BOT_TOKEN"]
 MG_BOT_ENDPOINT = os.environ["MG_BOT_ENDPOINT"]
+GOOGLE_CREDS_JSON = os.getenv("GOOGLE_CREDS_JSON", "")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 
 MSK = timezone(timedelta(hours=3))
 
@@ -130,6 +133,13 @@ async def daily_quality_scheduler():
             )
             report = format_report_csv(rows)
             logger.info("Quality report:\n%s", report)
+            if GOOGLE_CREDS_JSON and GOOGLE_SHEET_ID:
+                try:
+                    sheets = GoogleSheetsWriter(GOOGLE_CREDS_JSON, GOOGLE_SHEET_ID)
+                    await sheets.write_report(rows, str(datetime.now(MSK).date() - timedelta(days=1)))
+                    logger.info("Report written to Google Sheet")
+                except Exception as e:
+                    logger.error("Failed to write to Google Sheet: %s", e)
         except Exception as exc:
             logger.error("Quality check failed: %s", exc)
 
@@ -154,7 +164,7 @@ async def lifespan(app):
     await mg_client.close()
 
 
-app = FastAPI(title="RetailCRM Autotagger + Quality", version="5.0.0", lifespan=lifespan)
+app = FastAPI(title="RetailCRM Autotagger + Quality", version="5.1.0", lifespan=lifespan)
 
 
 @app.get("/")
@@ -174,6 +184,12 @@ async def manual_quality_check(days_ago: int = 1):
             target_date=target_date,
         )
         report = format_report_csv(rows)
+        if GOOGLE_CREDS_JSON and GOOGLE_SHEET_ID:
+            try:
+                sheets = GoogleSheetsWriter(GOOGLE_CREDS_JSON, GOOGLE_SHEET_ID)
+                await sheets.write_report(rows, str(target_date))
+            except Exception as e:
+                logger.error("Failed to write to Google Sheet: %s", e)
         return PlainTextResponse(report, media_type="text/csv; charset=utf-8")
     except Exception as exc:
         logger.error("Manual quality check failed: %s", exc)
