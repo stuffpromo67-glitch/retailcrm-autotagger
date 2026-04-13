@@ -1,6 +1,6 @@
 """
-main.py — Autotagger via MG Bot API
-Tags dialogs with multiple tags. Checks customer history.
+main.py — Autotagger via MG Bot API + RetailCRM API v5
+Sets CUSTOMER tags (attached/pinned) visible in chat UI.
 """
 
 import asyncio
@@ -22,14 +22,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(
 logger = logging.getLogger(__name__)
 
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+RETAILCRM_URL = os.getenv("RETAILCRM_URL", "")
+RETAILCRM_API_KEY = os.getenv("RETAILCRM_API_KEY", "")
 MG_BOT_TOKEN = os.environ["MG_BOT_TOKEN"]
 MG_BOT_ENDPOINT = os.environ["MG_BOT_ENDPOINT"]
 
-mg_client = MGBotClient(MG_BOT_ENDPOINT, MG_BOT_TOKEN)
+mg_client = MGBotClient(MG_BOT_ENDPOINT, MG_BOT_TOKEN, retailcrm_url=RETAILCRM_URL, retailcrm_api_key=RETAILCRM_API_KEY)
 
 
-async def process_chat(chat_id):
-    logger.info("Processing chat #%d", chat_id)
+async def process_chat(chat_id, mg_customer_id=None):
+    logger.info("Processing chat #%d, mg_customer_id=%s", chat_id, mg_customer_id)
     try:
         messages = await mg_client.get_chat_messages(chat_id, limit=30)
     except Exception as exc:
@@ -38,26 +40,35 @@ async def process_chat(chat_id):
     if not messages:
         return
 
-    # Find active dialog
-    dialog = await mg_client.get_active_dialog(chat_id)
-    if not dialog:
-        logger.warning("No dialog found for chat #%d", chat_id)
+    # Extract mg_customer_id from messages if not provided
+    if not mg_customer_id:
+        for msg in messages:
+            from_info = msg.get("from", {})
+            if from_info.get("type") == "customer":
+                mg_customer_id = from_info.get("id")
+                break
+    if not mg_customer_id:
+        logger.warning("No customer found in chat #%d", chat_id)
         return
-    dialog_id = dialog.get("id")
 
-    # Check if customer is new (first dialog ever)
+    # Find real RetailCRM customer ID
+    crm_customer_id = await mg_client.find_crm_customer_by_mg_id(mg_customer_id)
+    if not crm_customer_id:
+        logger.error("CRM customer not found for mg_customer_id=%s", mg_customer_id)
+        return
+
+    # Check if customer is new
     dialog_count = await mg_client.count_dialogs(chat_id)
     is_new_customer = dialog_count <= 1
-    logger.info("Chat #%d: %d dialogs, is_new=%s", chat_id, dialog_count, is_new_customer)
 
     dialog_text = build_dialog_text(messages)
     try:
         tags = classify_dialog(dialog_text, ANTHROPIC_API_KEY, is_new_customer=is_new_customer)
         if not tags:
-            logger.info("Chat #%d, dialog #%s -> skipped (not enough context)", chat_id, dialog_id)
+            logger.info("Chat #%d -> skipped (not enough context)", chat_id)
             return
-        logger.info("Chat #%d, dialog #%s -> tags: %s", chat_id, dialog_id, tags)
-        await mg_client.add_dialog_tags(dialog_id, tags)
+        logger.info("Chat #%d, CRM customer %s -> tags: %s", chat_id, crm_customer_id, tags)
+        await mg_client.set_customer_tags_attached(crm_customer_id, tags)
     except Exception as exc:
         logger.error("Error classifying chat #%d: %s", chat_id, exc)
 
@@ -83,8 +94,11 @@ async def ws_listener():
                         msg = data.get("message", {})
                         chat_id = msg.get("chat_id")
                         from_info = msg.get("from", {})
+                        mg_customer_id = None
+                        if from_info.get("type") == "customer":
+                            mg_customer_id = from_info.get("id")
                         if from_info.get("type") == "customer" and chat_id:
-                            asyncio.create_task(process_chat(int(chat_id)))
+                            asyncio.create_task(process_chat(int(chat_id), mg_customer_id))
         except (websockets.ConnectionClosed, OSError) as exc:
             logger.warning("WebSocket disconnected: %s, reconnecting in 5s", exc)
             await asyncio.sleep(5)
@@ -106,8 +120,8 @@ async def lifespan(app):
         pass
     await mg_client.close()
 
-app = FastAPI(title="RetailCRM Autotagger", version="3.2.0", lifespan=lifespan)
+app = FastAPI(title="RetailCRM Autotagger", version="4.0.0", lifespan=lifespan)
 
 @app.get("/")
 async def health():
-    return JSONResponse({"status": "ok", "version": "3.2.0", "mg_bot_endpoint": MG_BOT_ENDPOINT})
+    return JSONResponse({"status": "ok", "version": "4.0.0", "mg_bot_endpoint": MG_BOT_ENDPOINT})

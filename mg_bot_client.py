@@ -1,7 +1,8 @@
 """
-mg_bot_client.py — MG Bot API client
+mg_bot_client.py — MG Bot API + RetailCRM API client
 """
 
+import json
 import logging
 import httpx
 
@@ -10,14 +11,17 @@ _API = "/api/bot/v1"
 
 
 class MGBotClient:
-    def __init__(self, endpoint, token):
+    def __init__(self, endpoint, token, retailcrm_url=None, retailcrm_api_key=None):
         self.endpoint = endpoint.rstrip("/")
         self.token = token
+        self.retailcrm_url = (retailcrm_url or "").rstrip("/")
+        self.retailcrm_api_key = retailcrm_api_key or ""
         self._http = httpx.AsyncClient(
             base_url=self.endpoint,
             headers={"x-bot-token": token, "Content-Type": "application/json"},
             timeout=30.0,
         )
+        self._crm_http = httpx.AsyncClient(timeout=30.0)
 
     @property
     def ws_url(self):
@@ -30,41 +34,62 @@ class MGBotClient:
         return resp.json()
 
     async def get_dialogs(self, chat_id):
-        """Get all dialogs for a chat."""
         resp = await self._http.get(f"{_API}/dialogs", params={"chat_id": chat_id})
         resp.raise_for_status()
         return resp.json()
 
-    async def get_active_dialog(self, chat_id):
-        """Get the active (not closed) dialog for a chat."""
-        dialogs = await self.get_dialogs(chat_id)
-        for d in dialogs:
-            if d.get("closed_at") is None:
-                return d
-        if dialogs:
-            return dialogs[0]
-        return None
-
     async def count_dialogs(self, chat_id):
-        """Count total dialogs for a chat (to determine if customer is new)."""
         dialogs = await self.get_dialogs(chat_id)
         return len(dialogs)
 
-    async def add_dialog_tags(self, dialog_id, tags):
-        """Add tags to a dialog via MG Bot API."""
-        tag_objects = [{"name": t} for t in tags]
-        resp = await self._http.patch(
-            f"{_API}/dialogs/{dialog_id}/tags/add",
-            json={"tags": tag_objects},
-        )
-        if resp.is_success:
-            logger.info("Tags %s added to dialog #%d", tags, dialog_id)
-            return True
-        logger.error("Failed to add tags to dialog #%d: %s %s", dialog_id, resp.status_code, resp.text[:200])
-        return False
+    async def find_crm_customer_by_mg_id(self, mg_customer_id):
+        """Find RetailCRM customer ID by MG Bot customer ID."""
+        if not self.retailcrm_url or not self.retailcrm_api_key:
+            return None
+        url = f"{self.retailcrm_url}/api/v5/customers"
+        params = {
+            "apiKey": self.retailcrm_api_key,
+            "filter[mgCustomerId]": mg_customer_id,
+            "limit": 20,
+        }
+        try:
+            resp = await self._crm_http.get(url, params=params)
+            if resp.is_success:
+                data = resp.json()
+                customers = data.get("customers", [])
+                if customers:
+                    return customers[0].get("id")
+        except Exception as exc:
+            logger.error("Error searching customer: %s", exc)
+        return None
+
+    async def set_customer_tags_attached(self, crm_customer_id, tags):
+        """Add tags to customer AND pin (attach) them so they are visible in chat UI."""
+        if not self.retailcrm_url or not self.retailcrm_api_key:
+            logger.error("RetailCRM URL or API key not configured")
+            return False
+        url = f"{self.retailcrm_url}/api/v5/customers/{crm_customer_id}/edit"
+        data = {
+            "apiKey": self.retailcrm_api_key,
+            "by": "id",
+            "customer": json.dumps({"addTags": tags, "attachTags": tags}),
+        }
+        try:
+            resp = await self._crm_http.post(url, data=data)
+            if resp.is_success:
+                result = resp.json()
+                if result.get("success"):
+                    logger.info("Tags %s added and attached on CRM customer %s", tags, crm_customer_id)
+                    return True
+            logger.error("Failed to set tags: %s %s", resp.status_code, resp.text[:200])
+            return False
+        except Exception as exc:
+            logger.error("Error setting tags: %s", exc)
+            return False
 
     async def close(self):
         await self._http.aclose()
+        await self._crm_http.aclose()
 
 
 def build_dialog_text(messages):
