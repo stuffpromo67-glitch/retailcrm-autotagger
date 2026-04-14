@@ -45,7 +45,7 @@ class GoogleSheetsWriter:
 
     async def _append(self, rows):
         token = await self._get_token()
-        url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}/values/Sheet1!A1:append"
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}/values/Лист1!A1:append"
         async with httpx.AsyncClient() as c:
             r = await c.post(url, headers={"Authorization": f"Bearer {token}"},
                              params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
@@ -58,7 +58,7 @@ class GoogleSheetsWriter:
 
     async def _is_empty(self):
         token = await self._get_token()
-        url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}/values/Sheet1!A1:A1"
+        url = f"https://sheets.googleapis.com/v4/spreadsheets/{self.spreadsheet_id}/values/Лист1!A1:A1"
         async with httpx.AsyncClient() as c:
             r = await c.get(url, headers={"Authorization": f"Bearer {token}"})
             if r.is_success:
