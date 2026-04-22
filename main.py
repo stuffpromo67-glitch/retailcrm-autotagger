@@ -172,25 +172,61 @@ async def health():
     return JSONResponse({"status": "ok", "version": "5.0.0"})
 
 
-@app.post("/run-quality-check")
-async def manual_quality_check(days_ago: int = 1):
-    """Manually trigger quality check. ?days_ago=1 for yesterday (default)."""
-    target_date = datetime.now(MSK).date() - timedelta(days=days_ago)
+_inflight_checks = {}
+
+
+async def _run_and_persist(target_date):
+    """Run the quality check for target_date and write to Google Sheet."""
+    key = str(target_date)
+    _inflight_checks[key] = {"status": "running", "started_at": datetime.now(MSK).isoformat()}
     try:
+        logger.info("Manual quality check: running for %s", target_date)
         rows = await run_quality_check(
             MG_BOT_ENDPOINT, MG_BOT_TOKEN,
             RETAILCRM_URL, RETAILCRM_API_KEY,
             ANTHROPIC_API_KEY,
             target_date=target_date,
         )
-        report = format_report_csv(rows)
+        logger.info("Manual quality check: analyzed %d dialogs for %s", len(rows), target_date)
+        wrote = False
         if GOOGLE_CREDS_JSON and GOOGLE_SHEET_ID:
             try:
                 sheets = GoogleSheetsWriter(GOOGLE_CREDS_JSON, GOOGLE_SHEET_ID)
                 await sheets.write_report(rows, str(target_date))
+                wrote = True
+                logger.info("Manual quality check: report written to Google Sheet")
             except Exception as e:
                 logger.error("Failed to write to Google Sheet: %s", e)
-        return PlainTextResponse(report, media_type="text/csv; charset=utf-8")
+        _inflight_checks[key] = {
+            "status": "done",
+            "rows": len(rows),
+            "written_to_sheet": wrote,
+            "finished_at": datetime.now(MSK).isoformat(),
+        }
     except Exception as exc:
-        logger.error("Manual quality check failed: %s", exc)
-        return JSONResponse({"error": str(exc)}, status_code=500)
+        logger.error("Manual quality check failed: %s", exc, exc_info=True)
+        _inflight_checks[key] = {
+            "status": "error",
+            "error": str(exc),
+            "finished_at": datetime.now(MSK).isoformat(),
+        }
+
+
+@app.post("/run-quality-check")
+async def manual_quality_check(days_ago: int = 1):
+    """Kick off quality check in background. Poll /quality-check-status?date=YYYY-MM-DD."""
+    target_date = datetime.now(MSK).date() - timedelta(days=days_ago)
+    asyncio.create_task(_run_and_persist(target_date))
+    return JSONResponse({
+        "status": "started",
+        "target_date": str(target_date),
+        "poll": f"/quality-check-status?date={target_date}",
+    }, status_code=202)
+
+
+@app.get("/quality-check-status")
+async def quality_check_status(date: str = ""):
+    """Return status of the most recent manual quality check for a given date."""
+    if not date:
+        return JSONResponse(_inflight_checks)
+    return JSONResponse(_inflight_checks.get(date, {"status": "unknown"}))
