@@ -95,43 +95,94 @@ def analyze_dialog_with_claude(dialog_text, api_key):
     return None
 
 
-async def fetch_closed_dialogs(mg_endpoint, mg_token, since_dt, until_dt):
-    """Fetch dialogs closed between since_dt and until_dt."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        # Get closed dialogs
-        resp = await client.get(
-            f"{mg_endpoint}/api/bot/v1/dialogs",
-            headers={"x-bot-token": mg_token},
-            params={"is_active": "false", "limit": 100},
-        )
-        resp.raise_for_status()
-        all_dialogs = resp.json()
+def _parse_mg_ts(s):
+    """Parse MG Bot timestamps; normalize fractional seconds to <=6 digits."""
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    if "." in s:
+        main, rest = s.split(".", 1)
+        idx = None
+        for i, ch in enumerate(rest):
+            if ch in "+-":
+                idx = i
+                break
+        if idx is None:
+            frac, off = rest, ""
+        else:
+            frac, off = rest[:idx], rest[idx:]
+        frac = (frac + "000000")[:6]
+        s = f"{main}.{frac}{off}"
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        return None
 
-    # Filter by close date
+
+async def fetch_closed_dialogs(mg_endpoint, mg_token, since_dt, until_dt):
+    """Fetch dialogs closed between since_dt and until_dt.
+
+    Paginates backwards via until_id until the batch's oldest record is clearly
+    older than the target window. MG Bot API param is `active`, not `is_active`.
+    """
     result = []
-    for d in all_dialogs:
-        closed_at = d.get("closed_at")
-        if not closed_at:
-            continue
-        try:
-            closed_dt = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
-            if since_dt <= closed_dt < until_dt:
-                result.append(d)
-        except Exception:
-            continue
+    until_id = None
+    max_pages = 30
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for _ in range(max_pages):
+            params = {"active": "false", "limit": 100}
+            if until_id is not None:
+                params["until_id"] = until_id
+            resp = await client.get(
+                f"{mg_endpoint}/api/bot/v1/dialogs",
+                headers={"x-bot-token": mg_token},
+                params=params,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            for d in batch:
+                closed_at = d.get("closed_at")
+                if not closed_at:
+                    continue
+                closed_dt = _parse_mg_ts(closed_at)
+                if closed_dt and since_dt <= closed_dt < until_dt:
+                    result.append(d)
+            oldest = batch[-1]
+            oldest_ts = _parse_mg_ts(oldest.get("closed_at") or oldest.get("updated_at") or oldest.get("created_at"))
+            until_id = oldest.get("id")
+            # Stop when we've clearly passed the window (with a small buffer)
+            if oldest_ts and oldest_ts < since_dt - timedelta(hours=6):
+                break
+            if len(batch) < 100:
+                break
     return result
 
 
-async def fetch_dialog_messages(mg_endpoint, mg_token, chat_id, limit=50):
-    """Fetch messages for a chat."""
+async def fetch_dialog_messages(mg_endpoint, mg_token, dialog_id, limit=100):
+    """Fetch messages for a specific dialog."""
+    messages = []
+    since_id = None
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(
-            f"{mg_endpoint}/api/bot/v1/messages",
-            headers={"x-bot-token": mg_token},
-            params={"chat_id": chat_id, "limit": limit},
-        )
-        resp.raise_for_status()
-        return resp.json()
+        for _ in range(10):
+            params = {"dialog_id": dialog_id, "limit": limit}
+            if since_id is not None:
+                params["since_id"] = since_id
+            resp = await client.get(
+                f"{mg_endpoint}/api/bot/v1/messages",
+                headers={"x-bot-token": mg_token},
+                params=params,
+            )
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                break
+            messages.extend(batch)
+            if len(batch) < limit:
+                break
+            since_id = max(m["id"] for m in batch)
+    return messages
 
 
 async def fetch_crm_users(retailcrm_url, api_key):
@@ -207,11 +258,11 @@ async def run_quality_check(
         manager_crm_ext_id = responsible.get("external_id")
         manager_name = crm_users.get(int(manager_crm_ext_id), f"ID:{manager_crm_ext_id}") if manager_crm_ext_id else "Не назначен"
 
-        # Fetch messages
+        # Fetch messages — scoped to this dialog, not the whole chat history
         try:
-            messages = await fetch_dialog_messages(mg_endpoint, mg_token, chat_id)
+            messages = await fetch_dialog_messages(mg_endpoint, mg_token, dialog_id)
         except Exception as exc:
-            logger.error("Failed to fetch messages for chat #%d: %s", chat_id, exc)
+            logger.error("Failed to fetch messages for dialog #%d: %s", dialog_id, exc)
             continue
 
         if not messages:
